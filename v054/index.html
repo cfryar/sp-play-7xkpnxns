@@ -844,26 +844,69 @@ exports.init = init;
 
             // try to automatically decrypt on load if there is a saved password
             window.onload = async function () {
-                document.getElementById("staticrypt_loading").classList.remove("hidden");
-                staticryptConfig.staticryptEncryptedMsgUniqueVariableName = (await Promise.all(
-                    ["p0.txt", "p1.txt", "p2.txt", "p3.txt", "p4.txt", "p5.txt", "p6.txt", "p7.txt", "p8.txt", "p9.txt", "p10.txt", "p11.txt", "p12.txt", "p13.txt", "p14.txt", "p15.txt"].map((f) => fetch(f, { cache: "no-cache" }).then((r) => { if (!r.ok) throw new Error(f); return r.text(); }))
-                )).join("").trim();
-                const { isSuccessful } = await staticrypt.handleDecryptOnLoad();
-
-                // if we didn't decrypt anything on load, show the password prompt. Otherwise the content has already been
-                // replaced, no need to do anything
-                if (!isSuccessful) {
-                    // hide loading screen
-                    document.getElementById("staticrypt_loading").classList.add("hidden");
-                    document.getElementById("staticrypt_content").classList.remove("hidden");
-                    document.getElementById("staticrypt-password").focus();
-
-                    // show the remember me checkbox
-                    if (isRememberEnabled) {
-                        document.getElementById("staticrypt-remember-label").classList.remove("hidden");
+                const $id = (i) => document.getElementById(i);
+                $id("staticrypt_loading").classList.remove("hidden");
+                try {
+                    await loadParts(false);
+                } catch (e) {
+                    console.warn("[lock] part download failed, retrying without cache:", e);
+                    try { await loadParts(true); } catch (e2) {
+                        return showForm("Couldn't download the game (" + e2.message + "). Check your connection, then reload the page.");
                     }
                 }
+                let result = null;
+                try {
+                    result = await staticrypt.handleDecryptOnLoad();
+                } catch (e) {
+                    console.warn("[lock] saved login unusable, cleared:", e);
+                    clearRemembered();
+                }
+                // replaced by the game? then the lock page elements are gone and there is nothing to do
+                if (!$id("staticrypt_loading")) return;
+                if (!result || result.isSuccessful !== true) showForm("");
             };
+
+            const PARTS = ["p0.txt", "p1.txt", "p2.txt", "p3.txt", "p4.txt", "p5.txt", "p6.txt", "p7.txt", "p8.txt", "p9.txt", "p10.txt", "p11.txt", "p12.txt", "p13.txt", "p14.txt", "p15.txt"];
+            let partsFresh = false;
+            async function loadParts(bypassCache) {
+                const t0 = performance.now();
+                const get = async (f) => {
+                    const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), 90000);
+                    try {
+                        const url = bypassCache ? f + "?r=" + Date.now() : f;
+                        const r = await fetch(url, { cache: bypassCache ? "reload" : "no-cache", signal: ctl.signal });
+                        if (!r.ok) throw new Error(f + " HTTP " + r.status);
+                        return await r.text();
+                    } catch (e) {
+                        throw new Error(e.name === "AbortError" ? f + " timed out" : (e.message || String(e)));
+                    } finally { clearTimeout(timer); }
+                };
+                staticryptConfig.staticryptEncryptedMsgUniqueVariableName = (await Promise.all(PARTS.map(get))).join("").trim();
+                partsFresh = bypassCache;
+                console.info("[lock] " + PARTS.length + " parts in " + Math.round(performance.now() - t0) + " ms" + (bypassCache ? " (no cache)" : ""));
+            }
+            function clearRemembered() {
+                try {
+                    localStorage.removeItem(templateConfig.rememberPassphraseKey);
+                    localStorage.removeItem(templateConfig.rememberExpirationKey);
+                } catch (e) {}
+            }
+            function showForm(note) {
+                const $id = (i) => document.getElementById(i);
+                if (!$id("staticrypt_loading")) return;
+                $id("staticrypt_loading").classList.add("hidden");
+                $id("staticrypt_content").classList.remove("hidden");
+                if (isRememberEnabled) $id("staticrypt-remember-label").classList.remove("hidden");
+                let n = $id("staticrypt-note");
+                if (!n) {
+                    n = document.createElement("p");
+                    n.id = "staticrypt-note";
+                    n.style.cssText = "color:#ff8080;font-size:.9em;margin:.5em 0 0";
+                    $id("staticrypt-form").appendChild(n);
+                }
+                n.textContent = note || "";
+                $id("staticrypt-password").focus();
+            }
 
             // toggle password visibility
             const toggleIcon = document.querySelector(".staticrypt-toggle-password-visibility");
@@ -894,10 +937,22 @@ exports.init = init;
                 const password = document.getElementById("staticrypt-password").value,
                     isRememberChecked = document.getElementById("staticrypt-remember").checked;
 
-                const { isSuccessful } = await staticrypt.handleDecryptionOfPage(password, isRememberChecked);
-
-                if (!isSuccessful) {
-                    alert(templateError);
+                const btn = document.querySelector(".staticrypt-decrypt-button"), label = btn.value;
+                btn.disabled = true; btn.value = "…";
+                try {
+                    if (!staticryptConfig.staticryptEncryptedMsgUniqueVariableName) await loadParts(true);
+                    let { isSuccessful } = await staticrypt.handleDecryptionOfPage(password, isRememberChecked);
+                    // the right password can still fail against a stale or mixed cached part: re-download once, then retry
+                    if (!isSuccessful && !partsFresh) {
+                        await loadParts(true);
+                        ({ isSuccessful } = await staticrypt.handleDecryptionOfPage(password, isRememberChecked));
+                    }
+                    if (!isSuccessful) alert(templateError);
+                } catch (err) {
+                    console.error("[lock] unlock failed:", err);
+                    showForm("Unlock failed (" + (err && err.message || err) + "). Reload the page and try again.");
+                } finally {
+                    if (document.body.contains(btn)) { btn.disabled = false; btn.value = label; }
                 }
             });
         </script>
